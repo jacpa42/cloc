@@ -3,68 +3,109 @@ package cloc
 import "base:runtime"
 import "core:c"
 import "core:fmt"
+import "core:math/bits"
 import "core:mem"
 import "core:os"
 import "core:path/filepath"
 import "core:reflect"
-import "core:strings"
+import "core:testing"
 import "core:thread"
 import "core:time"
 
-FOLLOW_SYMLINKS := true
 SKIP_HIDDEN := false
-SKIP_PATTERNS := []string{".git", "target"}
-MAX_FILE_SIZE := i64(mem.Megabyte)
+SKIP_DIRS := []string{".git", "target"}
+MAX_FILE_SIZE :: 128 * mem.Kilobyte
 PATH_BUF_SIZE :: mem.Megabyte
-WHITESPACE :: " /n/t"
+MIN_THREADS :: 1
+MAX_THREADS :: 32
+#assert(MAX_THREADS > MIN_THREADS)
+/*
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ * */
+
+Comment :: distinct [2]u8
+
+SLASHSLASH :: Comment{'/', '/'}
+MINUSMINUS :: Comment{'-', '-'}
+HASH :: Comment{'#', '\x00'}
+SLASHSTAR :: Comment{'/', '*'}
+STARSLASH :: Comment{'/', '*'}
 
 @(rodata)
-COMMENT_STR := #partial [Code]string {
-	.odin = "//",
-	.lua  = "--",
-	.py   = "#",
-	.rs   = "//",
-	.c    = "//",
-	.zig  = "//",
+COMMENT_STR := [Code]Comment {
+	.unknown = {},
+	.c       = SLASHSLASH,
+	.json    = {},
+	.lua     = MINUSMINUS,
+	.odin    = SLASHSLASH,
+	.py      = HASH,
+	.rs      = SLASHSLASH,
+	.zig     = SLASHSLASH,
 }
 
 @(rodata)
-MULTILINE_COMMENT_BEGIN_STR := #partial [Code]string {
-	.odin = "/*",
-	.rs   = "/*",
-	.c    = "/*",
-	.zig  = "/*",
+MULTILINE_COMMENT_BEGIN_STR := [Code]Comment {
+	.unknown = {},
+	.c       = SLASHSTAR,
+	.json    = {},
+	.lua     = {},
+	.odin    = SLASHSTAR,
+	.py      = {},
+	.rs      = SLASHSTAR,
+	.zig     = SLASHSTAR,
 }
 
 @(rodata)
-MULTILINE_COMMENT_END_STR := #partial [Code]string {
-	.odin = "*/",
-	.rs   = "*/",
-	.c    = "*/",
-	.zig  = "*/",
+MULTILINE_COMMENT_END_STR := [Code]Comment {
+	.unknown = {},
+	.c       = STARSLASH,
+	.json    = {},
+	.lua     = {},
+	.odin    = STARSLASH,
+	.py      = {},
+	.rs      = STARSLASH,
+	.zig     = STARSLASH,
 }
-
-Void :: struct {}
 
 Code :: enum {
 	unknown = 0,
-	odin,
+	c,
+	json,
 	lua,
+	odin,
 	py,
 	rs,
 	zig,
-	json,
-	c,
+}
+
+Meta :: struct #packed {
+	tag:   Code,
+	comnt: Comment,
+	ml_st: Comment,
+	ml_ed: Comment,
 }
 
 CodeFile :: struct {
-	tag:        Code,
-	path_start: int,
-	path_end:   int,
-	byte_size:  i64,
+	meta:  Meta,
+	info:  Info,
+	stats: Stats,
+}
 
-	// Computed
-	stats:      Stats,
+Info :: struct {
+	path_start: u32,
+	path_end:   u32,
+	byte_size:  i32,
 }
 
 Stats :: struct {
@@ -81,50 +122,50 @@ main :: proc() {
 	defer fmt.eprintln("Finished in", time.stopwatch_duration(proc_timer))
 
 	subproc_timer: time.Stopwatch
+	fmt.eprintln(size_of(CodeFile))
 
-	pbuf = make([dynamic]u8); defer delete(pbuf)
+	pbuf = make([dynamic]u8, 0, mem.DEFAULT_PAGE_SIZE); defer delete(pbuf)
 
 	time.stopwatch_start(&subproc_timer)
-	directories_seen := make(map[string]Void)
 	codefiles := make([dynamic]CodeFile, 0, 128); defer delete(codefiles)
-	make_codefile_list(&codefiles, ".", &directories_seen)
+	make_codefile_list(&codefiles, ".")
 	time.stopwatch_stop(&subproc_timer)
 	fmt.eprintfln("Found {} files in {}", len(codefiles), time.stopwatch_duration(subproc_timer))
 
 	total_size_of_all_files: i64 = 0
-	for cf in codefiles {total_size_of_all_files += cf.byte_size}
+	for cf in codefiles {total_size_of_all_files += i64(cf.info.byte_size)}
 
 	// Process files
 	time.stopwatch_reset(&subproc_timer); time.stopwatch_start(&subproc_timer)
 	{
-		NUM_PROCESSES :: 24
-		chunk_size := total_size_of_all_files / NUM_PROCESSES
+		num_eaters := clamp(i64(os.get_processor_core_count()), MIN_THREADS, MAX_THREADS)
+		chunk_size := total_size_of_all_files / num_eaters
 
-		threads: [NUM_PROCESSES]^thread.Thread
+		threads: [dynamic; MAX_THREADS]^thread.Thread
 		index := 0
-		when NUM_PROCESSES > 1 {
-			for n in 0 ..< NUM_PROCESSES - 1 {
-				start := index
-				size_assigned: i64 = 0
-				for index < len(codefiles) && size_assigned < chunk_size {
-					size_assigned += codefiles[index].byte_size
-					index += 1
-				}
-				chunk := codefiles[start:index]
-				threads[n] = thread.create_and_start_with_poly_data(chunk, eat_chunk)
+		for _ in 0 ..< num_eaters - 1 {
+			start := index
+			size_assigned: i64 = 0
+			for index < len(codefiles) && size_assigned < chunk_size {
+				size_assigned += i64(codefiles[index].info.byte_size)
+				index += 1
 			}
+			chunk := codefiles[start:index]
+			if len(chunk) > 0 {
+				append(&threads, thread.create_and_start_with_poly_data(chunk, eat_chunk))
+			}
+			if size_assigned >= total_size_of_all_files {break}
 		}
-		chunk := codefiles[index:]
-		threads[NUM_PROCESSES - 1] = thread.create_and_start_with_poly_data(chunk, eat_chunk)
+		eat_chunk(codefiles[index:])
 
-		for t in threads {thread.destroy(t)}
+		for t in threads[:] {thread.destroy(t)}
 	}
 
 	// Merge stats
 	total_lines := 0
 	combined_stats: [Code]Stats
 	for codefile in codefiles[:] {
-		codefile_stats_merge(&combined_stats[codefile.tag], codefile.stats)
+		codefile_stats_merge(&combined_stats[codefile.meta.tag], codefile.stats)
 		total_lines += int(codefile.stats.code + codefile.stats.comments)
 	}
 	time.stopwatch_stop(&subproc_timer)
@@ -144,29 +185,117 @@ main :: proc() {
 }
 
 eat_chunk :: proc(chunk: []CodeFile) {
+	if len(chunk) == 0 {return}
+
 	file_data_buf := make([]u8, MAX_FILE_SIZE); defer delete(file_data_buf)
 	file_data_arena: mem.Arena; mem.arena_init(&file_data_arena, file_data_buf)
 	file_data_allocator := mem.arena_allocator(&file_data_arena)
 
 	for &codefile in chunk {
 		defer mem.arena_free_all(&file_data_arena)
-		path := string(pbuf[codefile.path_start:codefile.path_end])
+		path := string(pbuf[codefile.info.path_start:codefile.info.path_end])
 		data, err := os.read_entire_file_from_path(path, file_data_allocator)
-		if err == nil {make_codefile_stats(&codefile.stats, codefile.tag, data)}
+		if err == nil {make_codefile_stats(&codefile.stats, codefile.meta, &data)}
 	}
 }
 
-make_codefile_stats :: proc(stats: ^Stats, tag: Code, data: []byte) {
-	stats.num_files += 1
-	datastr := string(data)
-	check_comments := len(COMMENT_STR[tag]) > 0
-	for str in strings.split_lines_iterator(&datastr) {
-		line := strings.trim_left(str, WHITESPACE)
-		if check_comments && strings.starts_with(line, COMMENT_STR[tag]) {
-			stats.comments += 1
-		} else { 	// TODO: Multiline comments
-			stats.code += 1
+split_lines_iterator :: proc(s: ^[]u8) -> (line: []u8, ok: bool) {
+	l := len(s)
+	for index in 0 ..< l {
+		if s[index] == '\n' {
+			line, ok = s[:index], true
+			s^ = s[index + 1:]
+			return
 		}
+	}
+	ok = len(s) > 0
+	line = s^
+	s^ = s[len(s):]
+	return
+}
+
+@(test)
+split_those_lines :: proc(t: ^testing.T) {
+	lines := transmute([]u8)(string("hi\nmy\nname\nis\njacob\n"))
+	line_array := []string{"hi", "my", "name", "is", "jacob", ""}
+	index := 0
+	for line in split_lines_iterator(&lines) {
+		defer index += 1
+		testing.expect(t, string(line) == line_array[index])
+	}
+}
+
+starts_with :: proc(s: []u8, pat: Comment) -> bool {
+	return(
+		len(s) >= int(len_comment_prefix(pat)) &&
+		(pat[0] != 0 && s[0] == pat[0]) &&
+		(pat[1] != 0 && s[1] == pat[1]) \
+	)
+}
+
+ends_with :: proc(s: []u8, pat: Comment) -> bool {
+	return(
+		len(s) >= int(len_comment_prefix(pat)) &&
+		(pat[0] != 0 && s[0] == pat[0]) &&
+		(pat[1] != 0 && s[1] == pat[1]) \
+	)
+}
+
+trim_right :: proc(s: []u8) -> (trimmed: []u8) {
+	trimmed = s
+	for len(trimmed) > 0 {
+		last := len(trimmed) - 1
+		switch trimmed[last] {
+		case '\t', '\n', '\v', '\f', '\r', ' ':
+			trimmed = trimmed[:last]
+		case:
+			return
+		}
+	}
+	return
+}
+
+trim_left :: proc(s: []u8) -> (trimmed: []u8) {
+	trimmed = s
+	for len(trimmed) > 0 {
+		switch trimmed[0] {
+		case '\t', '\n', '\v', '\f', '\r', ' ':
+			trimmed = trimmed[1:]
+		case:
+			return
+		}
+	}
+	return
+}
+
+trim :: proc(s: []u8) -> (trimmed: []u8) {
+	return trim_left(trim_right(s))
+}
+
+len_comment_prefix :: proc(cp: Comment) -> u8 {
+	return u8(cp[0] != 0) + u8(cp[1] != 0)
+}
+
+make_codefile_stats :: proc(stats: ^Stats, meta: Meta, data: ^[]u8) {
+	stats.num_files += 1
+	in_multiline_comment := false
+
+	for str in split_lines_iterator(data) {
+		line := trim(str)
+		if len(line) == 0 {continue}
+
+		if in_multiline_comment {
+			in_multiline_comment = !ends_with(line, meta.ml_ed)
+			stats.comments += 1; continue
+		} else if starts_with(line, meta.ml_st) {
+			stats.comments += 1; continue
+		}
+
+		if starts_with(line, meta.comnt) {
+			stats.comments += 1; continue
+		}
+
+		stats.code += 1; continue
 	}
 }
 
@@ -190,7 +319,7 @@ should_skip_dir :: proc(dir: string) -> bool {
 	dir_name := filepath.base(dir)
 	if SKIP_HIDDEN && len(dir_name) > 1 && dir_name[0] == '.' { 	// hidden
 		return true}
-	for skip_dir in SKIP_PATTERNS {
+	for skip_dir in SKIP_DIRS {
 		if skip_dir == dir_name {
 			return true
 		}
@@ -203,17 +332,10 @@ should_skip_file :: proc(file_name: string) -> bool {
 }
 
 // Grows list with the context.allocator
-make_codefile_list :: proc(
-	list: ^[dynamic]CodeFile,
-	starting_directory: string,
-	directories_seen: ^map[string]Void,
-) {
-	if starting_directory in directories_seen || should_skip_dir(starting_directory) {
+make_codefile_list :: proc(list: ^[dynamic]CodeFile, starting_directory: string) {
+	if should_skip_dir(starting_directory) {
 		// fmt.eprintln("Skipping {}", starting_directory)
 		return
-	} else {
-		// fmt.eprintln("Recursing into directory {}", starting_directory)
-		directories_seen[starting_directory] = {}
 	}
 	f, oerr := os.open(starting_directory)
 	if oerr != nil {return}
@@ -223,15 +345,11 @@ make_codefile_list :: proc(
 	defer os.read_directory_iterator_destroy(&it)
 
 	for info in os.read_directory_iterator(&it) {
-		make_codefile_list_from_finfo(list, info, directories_seen) or_continue
+		make_codefile_list_from_finfo(list, info) or_continue
 	}
 }
 
-make_codefile_list_from_finfo :: proc(
-	list: ^[dynamic]CodeFile,
-	info: os.File_Info,
-	directories_seen: ^map[string]Void,
-) -> os.Error {
+make_codefile_list_from_finfo :: proc(list: ^[dynamic]CodeFile, info: os.File_Info) -> os.Error {
 	#partial switch info.type {
 	case .Regular:
 		if should_skip_file(info.name) {return nil}
@@ -239,21 +357,30 @@ make_codefile_list_from_finfo :: proc(
 		tag := codefile_tag(info.fullpath)
 		if tag == .unknown || info.size > MAX_FILE_SIZE {return nil}
 
-		path_start := len(pbuf)
-		path_end := path_start + len(info.fullpath)
+		path_strt := len(pbuf)
+		path_back := path_strt + len(info.fullpath)
 		append(&pbuf, info.fullpath)
 
-		append(list, CodeFile{tag, path_start, path_end, info.size, Stats{}})
+		comment_data := Meta {
+			tag   = tag,
+			comnt = COMMENT_STR[tag],
+			ml_st = MULTILINE_COMMENT_BEGIN_STR[tag],
+			ml_ed = MULTILINE_COMMENT_END_STR[tag],
+		}
+
+		assert(info.size >= bits.I32_MIN); assert(info.size <= bits.I32_MAX)
+		assert(path_strt >= bits.U32_MIN); assert(path_strt <= bits.U32_MAX)
+		assert(path_back >= bits.U32_MIN); assert(path_back <= bits.U32_MAX)
+		codefile_info := Info {
+			path_start = u32(path_strt),
+			path_end   = u32(path_back),
+			byte_size  = i32(info.size),
+		}
+		append(list, CodeFile{comment_data, codefile_info, Stats{}})
 
 	case .Directory:
-		make_codefile_list(list, info.fullpath, directories_seen)
+		make_codefile_list(list, info.fullpath)
 
-	case .Symlink:
-		if FOLLOW_SYMLINKS {
-			location := os.read_link(info.fullpath, context.temp_allocator) or_return
-			link_info := os.stat(location, context.temp_allocator) or_return
-			return make_codefile_list_from_finfo(list, link_info, directories_seen)
-		}
 	}
 
 	return nil
