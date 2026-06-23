@@ -1,7 +1,6 @@
 package cloc
 
 import "base:runtime"
-import "core:c"
 import "core:fmt"
 import "core:math/bits"
 import "core:mem"
@@ -19,66 +18,46 @@ PATH_BUF_SIZE :: mem.Megabyte
 MIN_THREADS :: 1
 MAX_THREADS :: 32
 #assert(MAX_THREADS > MIN_THREADS)
-/*
- *
- *
- *
- *
- *
- *
- *
- *
- *
- *
- *
- *
- * */
 
 Comment :: distinct [2]u8
-
-SLASHSLASH :: Comment{'/', '/'}
-MINUSMINUS :: Comment{'-', '-'}
-HASH :: Comment{'#', '\x00'}
-SLASHSTAR :: Comment{'/', '*'}
-STARSLASH :: Comment{'/', '*'}
 
 @(rodata)
 COMMENT_STR := [Code]Comment {
 	.unknown = {},
-	.c       = SLASHSLASH,
+	.c       = {'/', '/'},
 	.json    = {},
-	.lua     = MINUSMINUS,
-	.odin    = SLASHSLASH,
-	.py      = HASH,
-	.rs      = SLASHSLASH,
-	.zig     = SLASHSLASH,
+	.lua     = {'-', '-'},
+	.odin    = {'/', '/'},
+	.py      = {'#', '\x00'},
+	.rs      = {'/', '/'},
+	.zig     = {'/', '/'},
 }
 
 @(rodata)
 MULTILINE_COMMENT_BEGIN_STR := [Code]Comment {
 	.unknown = {},
-	.c       = SLASHSTAR,
+	.c       = {'/', '*'},
 	.json    = {},
 	.lua     = {},
-	.odin    = SLASHSTAR,
+	.odin    = {'/', '*'},
 	.py      = {},
-	.rs      = SLASHSTAR,
-	.zig     = SLASHSTAR,
+	.rs      = {'/', '*'},
+	.zig     = {'/', '*'},
 }
 
 @(rodata)
 MULTILINE_COMMENT_END_STR := [Code]Comment {
 	.unknown = {},
-	.c       = STARSLASH,
+	.c       = {'*', '/'},
 	.json    = {},
 	.lua     = {},
-	.odin    = STARSLASH,
+	.odin    = {'*', '/'},
 	.py      = {},
-	.rs      = STARSLASH,
-	.zig     = STARSLASH,
+	.rs      = {'*', '/'},
+	.zig     = {'*', '/'},
 }
 
-Code :: enum {
+Code :: enum u8 {
 	unknown = 0,
 	c,
 	json,
@@ -89,18 +68,20 @@ Code :: enum {
 	zig,
 }
 
-Meta :: struct #packed {
+Meta :: struct {
 	tag:   Code,
 	comnt: Comment,
 	ml_st: Comment,
 	ml_ed: Comment,
 }
+#assert(size_of(Meta) == 7)
 
 CodeFile :: struct {
 	meta:  Meta,
 	info:  Info,
 	stats: Stats,
 }
+#assert(size_of(CodeFile) == 8 + 12 + 12)
 
 Info :: struct {
 	path_start: u32,
@@ -122,7 +103,6 @@ main :: proc() {
 	defer fmt.eprintln("Finished in", time.stopwatch_duration(proc_timer))
 
 	subproc_timer: time.Stopwatch
-	fmt.eprintln(size_of(CodeFile))
 
 	pbuf = make([dynamic]u8, 0, mem.DEFAULT_PAGE_SIZE); defer delete(pbuf)
 
@@ -142,7 +122,10 @@ main :: proc() {
 		chunk_size := total_size_of_all_files / num_eaters
 
 		threads: [dynamic; MAX_THREADS]^thread.Thread
+		defer for t in threads[:] {thread.destroy(t)}
+
 		index := 0
+		defer eat_chunk(codefiles[index:]) // eat the rest of them
 		for _ in 0 ..< num_eaters - 1 {
 			start := index
 			size_assigned: i64 = 0
@@ -156,9 +139,7 @@ main :: proc() {
 			}
 			if size_assigned >= total_size_of_all_files {break}
 		}
-		eat_chunk(codefiles[index:])
 
-		for t in threads[:] {thread.destroy(t)}
 	}
 
 	// Merge stats
@@ -226,19 +207,191 @@ split_those_lines :: proc(t: ^testing.T) {
 }
 
 starts_with :: proc(s: []u8, pat: Comment) -> bool {
+	lpat := len_comment_prefix(pat)
 	return(
-		len(s) >= int(len_comment_prefix(pat)) &&
-		(pat[0] != 0 && s[0] == pat[0]) &&
-		(pat[1] != 0 && s[1] == pat[1]) \
+		lpat > 0 &&
+		len(s) >= int(lpat) &&
+		(pat[0] == 0 || pat[0] == s[0]) &&
+		(pat[1] == 0 || pat[1] == s[1]) \
 	)
 }
 
+@(test)
+stw :: proc(t: ^testing.T) {
+	{ 	// nowhere
+		comment_str: []Comment = {Comment{}, Comment{'-', '\x00'}, Comment{'/', '*'}}
+		strings: [][]u8 = {
+			transmute([]u8)string(""),
+			transmute([]u8)string("**/"),
+			transmute([]u8)string("**//slkjflsffoijosvsjfsjf**//"),
+		}
+		for cstr in comment_str {
+			for st in strings {
+				testing.expectf(
+					t,
+					!starts_with(st, cstr),
+					"%s starts {} {}?",
+					st,
+					rune(cstr[0]),
+					rune(cstr[1]),
+				)
+			}
+		}
+
+		cstr := Comment{'-', '-'}
+		st := transmute([]u8)string("-")
+		testing.expectf(
+			t,
+			!starts_with(st, cstr),
+			"%s doesnt starts {} {}?",
+			st,
+			rune(cstr[0]),
+			rune(cstr[1]),
+		)
+	}
+	{ 	// somewhere
+		cstr: Comment
+		st: []u8
+
+		cstr = Comment{'-', '-'}
+		st = transmute([]u8)string("--327666alaallaa")
+		testing.expectf(
+			t,
+			starts_with(st, cstr),
+			"%s doesnt starts {} {}?",
+			st,
+			rune(cstr[0]),
+			rune(cstr[1]),
+		)
+
+		cstr = Comment{'/', '-'}
+		st = transmute([]u8)string("/-hleooo")
+		testing.expectf(
+			t,
+			starts_with(st, cstr),
+			"%s doesnt starts {} {}?",
+			st,
+			rune(cstr[0]),
+			rune(cstr[1]),
+		)
+
+		cstr = Comment{'-', '?'}
+		st = transmute([]u8)string("-?aooooo")
+		testing.expectf(
+			t,
+			starts_with(st, cstr),
+			"%s doesnt starts {} {}?",
+			st,
+			rune(cstr[0]),
+			rune(cstr[1]),
+		)
+	}
+}
+
 ends_with :: proc(s: []u8, pat: Comment) -> bool {
+	lpat := len_comment_prefix(pat)
 	return(
-		len(s) >= int(len_comment_prefix(pat)) &&
-		(pat[0] != 0 && s[0] == pat[0]) &&
-		(pat[1] != 0 && s[1] == pat[1]) \
+		lpat > 0 &&
+		len(s) >= int(lpat) &&
+		(pat[0] == 0 || pat[0] == s[len(s) - 2]) &&
+		(pat[1] == 0 || pat[1] == s[len(s) - 1]) \
 	)
+}
+
+@(test)
+etw :: proc(t: ^testing.T) {
+	{ 	// nowhere
+		comment_str: []Comment = {Comment{}, Comment{'-', '\x00'}, Comment{'/', '*'}}
+		strings: [][]u8 = {
+			transmute([]u8)string("   "),
+			transmute([]u8)string("**/"),
+			transmute([]u8)string("**//slkjflsffoijosvsjfsjf**//"),
+		}
+		for cstr in comment_str {
+			for st in strings {
+				testing.expectf(
+					t,
+					!ends_with(st, cstr),
+					"%s ends with {} {} {} {}?",
+					st,
+					rune(cstr[0]),
+					rune(cstr[1]),
+					(cstr[0] == 0 || st[len(st) - 2] == cstr[0]),
+					(cstr[1] == 0 || st[len(st) - 1] == cstr[1]),
+				)
+			}
+		}
+
+		cstr := Comment{'-', '-'}
+		st := transmute([]u8)string("-")
+		testing.expectf(
+			t,
+			!ends_with(st, cstr),
+			"%s ends with {} {}?",
+			st,
+			rune(cstr[0]),
+			rune(cstr[1]),
+		)
+
+		cstr = Comment{'\x00', '*'}
+		st = transmute([]u8)string("------**********")
+		testing.expectf(
+			t,
+			ends_with(st, cstr),
+			"%s ends with {} {}?",
+			st,
+			rune(cstr[0]),
+			rune(cstr[1]),
+		)
+	}
+	{ 	// somewhere
+		cstr: Comment
+		st: []u8
+
+		cstr = Comment{'-', '-'}
+		st = transmute([]u8)string("--i277777c--")
+		testing.expectf(
+			t,
+			ends_with(st, cstr),
+			"%s doesnt end with {} {}?",
+			st,
+			rune(cstr[0]),
+			rune(cstr[1]),
+		)
+
+		cstr = Comment{'/', '*'}
+		st = transmute([]u8)string("//*")
+		testing.expectf(
+			t,
+			ends_with(st, cstr),
+			"%s doesnt end with {} {}?",
+			st,
+			rune(cstr[0]),
+			rune(cstr[1]),
+		)
+
+		cstr = Comment{'-', '?'}
+		st = transmute([]u8)string("?-333999977777777-?")
+		testing.expectf(
+			t,
+			ends_with(st, cstr),
+			"%s doesnt end with \"{}\"!=\"{}\"?",
+			st,
+			st[len(st) - 2:],
+			cstr,
+		)
+
+		cstr = Comment{'*', '\x00'}
+		st = transmute([]u8)string("------**********")
+		testing.expectf(
+			t,
+			ends_with(st, cstr),
+			"%s doesnt end with {} {}?",
+			st,
+			rune(cstr[0]),
+			rune(cstr[1]),
+		)
+	}
 }
 
 trim_right :: proc(s: []u8) -> (trimmed: []u8) {
@@ -282,12 +435,18 @@ make_codefile_stats :: proc(stats: ^Stats, meta: Meta, data: ^[]u8) {
 
 	for str in split_lines_iterator(data) {
 		line := trim(str)
-		if len(line) == 0 {continue}
+		if len(line) == 0 {
+			if in_multiline_comment {
+				stats.comments += 1
+			}
+			continue
+		}
 
 		if in_multiline_comment {
 			in_multiline_comment = !ends_with(line, meta.ml_ed)
 			stats.comments += 1; continue
 		} else if starts_with(line, meta.ml_st) {
+			in_multiline_comment = true
 			stats.comments += 1; continue
 		}
 
