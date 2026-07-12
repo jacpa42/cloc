@@ -25,6 +25,7 @@ Comment :: distinct [2]u8
 COMMENT_STR := [Code]Comment {
 	.unknown = {},
 	.c       = {'/', '/'},
+	.h       = {'/', '/'},
 	.json    = {},
 	.lua     = {'-', '-'},
 	.odin    = {'/', '/'},
@@ -37,6 +38,7 @@ COMMENT_STR := [Code]Comment {
 MULTILINE_COMMENT_BEGIN_STR := [Code]Comment {
 	.unknown = {},
 	.c       = {'/', '*'},
+	.h       = {'/', '*'},
 	.json    = {},
 	.lua     = {},
 	.odin    = {'/', '*'},
@@ -49,6 +51,7 @@ MULTILINE_COMMENT_BEGIN_STR := [Code]Comment {
 MULTILINE_COMMENT_END_STR := [Code]Comment {
 	.unknown = {},
 	.c       = {'*', '/'},
+	.h       = {'*', '/'},
 	.json    = {},
 	.lua     = {},
 	.odin    = {'*', '/'},
@@ -60,6 +63,7 @@ MULTILINE_COMMENT_END_STR := [Code]Comment {
 Code :: enum u8 {
 	unknown = 0,
 	c,
+	h,
 	json,
 	lua,
 	odin,
