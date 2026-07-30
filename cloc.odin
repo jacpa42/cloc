@@ -25,6 +25,7 @@ Comment :: distinct [2]u8
 COMMENT_STR := [Code]Comment {
 	.unknown = {},
 	.c       = {'/', '/'},
+	.cpp     = {'/', '/'},
 	.h       = {'/', '/'},
 	.json    = {},
 	.lua     = {'-', '-'},
@@ -38,6 +39,7 @@ COMMENT_STR := [Code]Comment {
 MULTILINE_COMMENT_BEGIN_STR := [Code]Comment {
 	.unknown = {},
 	.c       = {'/', '*'},
+	.cpp     = {'/', '*'},
 	.h       = {'/', '*'},
 	.json    = {},
 	.lua     = {},
@@ -51,6 +53,7 @@ MULTILINE_COMMENT_BEGIN_STR := [Code]Comment {
 MULTILINE_COMMENT_END_STR := [Code]Comment {
 	.unknown = {},
 	.c       = {'*', '/'},
+	.cpp     = {'*', '/'},
 	.h       = {'*', '/'},
 	.json    = {},
 	.lua     = {},
@@ -63,6 +66,7 @@ MULTILINE_COMMENT_END_STR := [Code]Comment {
 Code :: enum u8 {
 	unknown = 0,
 	c,
+	cpp,
 	h,
 	json,
 	lua,
@@ -108,7 +112,7 @@ main :: proc() {
 
 	subproc_timer: time.Stopwatch
 
-	pbuf = make([dynamic]u8, 0, mem.DEFAULT_PAGE_SIZE); defer delete(pbuf)
+	pbuf = make([dynamic]u8, 0, mem.PAGE_SIZE); defer delete(pbuf)
 
 	time.stopwatch_start(&subproc_timer)
 	codefiles := make([dynamic]CodeFile, 0, 128); defer delete(codefiles)
